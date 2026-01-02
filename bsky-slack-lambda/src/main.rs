@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Result};
+use base64::Engine;
 use hmac::{Hmac, Mac};
 use lambda_runtime::{service_fn, Error as LambdaError, LambdaEvent};
 use regex::Regex;
@@ -49,8 +50,19 @@ async fn handle_request(
 async fn process_request(
     request: ApiGatewayProxyRequest,
 ) -> Result<ApiGatewayProxyResponse> {
-    let body = request.body.unwrap_or_default();
+    let raw_body = request.body.unwrap_or_default();
     let headers = request.headers.unwrap_or_default();
+
+    // Decode body if base64-encoded
+    let body = if request.is_base64_encoded.unwrap_or(false) {
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(&raw_body)
+            .map_err(|e| anyhow!("Failed to decode base64 body: {}", e))?;
+        String::from_utf8(decoded)
+            .map_err(|e| anyhow!("Body is not valid UTF-8: {}", e))?
+    } else {
+        raw_body
+    };
 
     // Verify Slack request signature
     if let Err(e) = verify_slack_signature(&headers, &body) {

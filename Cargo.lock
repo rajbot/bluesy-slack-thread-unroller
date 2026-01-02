@@ -121,6 +121,7 @@ name = "bsky-slack-lambda"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "bsky-thread-lib",
  "hex",
  "hmac",
