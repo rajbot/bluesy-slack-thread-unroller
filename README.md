@@ -135,7 +135,15 @@ aws iam attach-role-policy \
 3. Set **Request URL** to: `https://YOUR_API_GATEWAY_URL/slack/events`
 4. Click **Save Changes**
 
-### Step 8: Test
+### Step 8: Invite Bot to Channel
+
+The bot must be invited to any channel where you want to use it:
+
+1. Go to the channel where you want to use the shortcut
+2. Type `/invite @YourBotName` (use your bot's app name)
+3. Or: Click channel name → **Integrations** → **Add apps**
+
+### Step 9: Test
 
 1. In Slack, find a message containing a Bluesky post URL
 2. Click the **⋮** (more actions) menu on the message
