@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "bsky-thread-lib",
+    "bsky-thread-cli",
+    "bsky-slack-lambda",
+]
+resolver = "2"

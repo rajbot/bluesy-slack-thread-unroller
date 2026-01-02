@@ -1,0 +1,22 @@
+# Build artifacts
+/target/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+
+# Environment variables
+.env
+.env.*
+
+# Lambda build artifacts
+.lambda/
+
+# Claude
+.claude/
