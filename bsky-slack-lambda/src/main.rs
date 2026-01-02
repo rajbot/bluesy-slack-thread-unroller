@@ -193,11 +193,10 @@ async fn handle_bluesky_shortcut(payload: ShortcutPayload) -> Result<ApiGatewayP
     );
 
     // Post each thread post as a reply in the Slack thread
+    // Skip the first post (index 0) since it's already in the original message
     let client = reqwest::Client::new();
 
-    for (i, post) in thread.posts.iter().enumerate() {
-        // Skip the first post if it's already in the original message
-        // Actually, post all of them so the user has the full thread
+    for (i, post) in thread.posts.iter().enumerate().skip(1) {
         let message_text = &post.url;
 
         let post_request = serde_json::json!({
