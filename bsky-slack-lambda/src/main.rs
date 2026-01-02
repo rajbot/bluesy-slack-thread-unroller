@@ -140,6 +140,9 @@ async fn handle_bluesky_shortcut(payload: ShortcutPayload) -> Result<ApiGatewayP
     let bot_token = std::env::var("SLACK_BOT_TOKEN")
         .map_err(|_| anyhow!("SLACK_BOT_TOKEN not set"))?;
 
+    // Debug log the payload
+    info!("Channel payload: {:?}", payload.channel);
+
     // Extract message text
     let message_text = payload
         .message
@@ -148,12 +151,17 @@ async fn handle_bluesky_shortcut(payload: ShortcutPayload) -> Result<ApiGatewayP
         .and_then(|t| t.as_str())
         .unwrap_or("");
 
-    // Extract channel ID
+    // Extract channel ID - try both "id" field and direct string
     let channel_id = payload
         .channel
         .as_ref()
-        .and_then(|c| c.get("id"))
-        .and_then(|id| id.as_str())
+        .and_then(|c| {
+            // Try as object with "id" field first
+            c.get("id")
+                .and_then(|id| id.as_str())
+                // Fall back to direct string value
+                .or_else(|| c.as_str())
+        })
         .ok_or_else(|| anyhow!("Could not find channel ID"))?;
 
     // Extract message timestamp for threading
