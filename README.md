@@ -67,7 +67,8 @@ The Slack app uses a message shortcut called "Unroll Bluesky Thread". When trigg
 1. In the left sidebar, click **OAuth & Permissions**
 2. Under **Scopes** → **Bot Token Scopes**, add:
    - `chat:write` - Post messages
-   - `links:read` - Read URLs in messages (for unfurling)
+   - `links:read` - Read URLs in messages
+   - `links:write` - Required for Slack to unfurl links in bot messages
 3. Scroll up and click **Install to Workspace**
 4. Authorize the app
 5. Copy the **Bot User OAuth Token** (starts with `xoxb-`)
