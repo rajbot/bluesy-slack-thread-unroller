@@ -261,3 +261,93 @@ pub async fn fetch_thread(url: &str) -> Result<ThreadOutput> {
         posts,
     })
 }
+
+/// Fetch a Bluesky thread with recursive pagination to get the true total count.
+///
+/// This function works around Bluesky's API depth limit (~10-11 posts) by recursively
+/// fetching pages until all posts are retrieved.
+///
+/// # Arguments
+/// * `url` - A Bluesky post URL (e.g., "https://bsky.app/profile/user.bsky.social/post/xyz")
+///
+/// # Returns
+/// A tuple of (`ThreadOutput`, `total_count`) where total_count is the true number of posts.
+pub async fn fetch_thread_with_total(url: &str) -> Result<(ThreadOutput, usize)> {
+    let mut all_posts = Vec::new();
+    let client = reqwest::Client::new();
+
+    // Parse initial URL
+    let (handle, post_id) = parse_bsky_url(url)?;
+
+    // Resolve handle to DID (unless it's already a DID)
+    let did = if handle.starts_with("did:") {
+        handle.clone()
+    } else {
+        resolve_handle(&client, &handle).await?
+    };
+
+    let author_handle = handle.clone();
+
+    // Fetch first page
+    let at_uri = format!("at://{}/app.bsky.feed.post/{}", did, post_id);
+    let mut response = get_post_thread(&client, &at_uri).await?;
+    let author_did = response.thread.post.author.did.clone();
+    let display_name = response.thread.post.author.display_name.clone();
+
+    // Collect posts from first page
+    let mut posts = collect_author_posts(&response.thread, &author_did, &author_handle);
+    all_posts.extend(posts.clone());
+
+    // Keep fetching while we get ~10 posts (indicates truncation)
+    const MAX_PAGES: usize = 20; // Safety limit
+    for _ in 0..MAX_PAGES {
+        if posts.len() < 10 {
+            break; // Last page - we got everything
+        }
+
+        // Fetch next page starting from last post's URI
+        let last_uri = &posts.last().unwrap().uri;
+        response = get_post_thread(&client, last_uri).await?;
+        posts = collect_author_posts(&response.thread, &author_did, &author_handle);
+
+        // Skip first post (it's the duplicate continuation point)
+        if posts.len() > 1 {
+            all_posts.extend(posts.iter().skip(1).cloned());
+        } else {
+            break;
+        }
+    }
+
+    let total_count = all_posts.len();
+    let author_output = AuthorOutput {
+        did: author_did,
+        handle: author_handle,
+        display_name,
+    };
+
+    Ok((ThreadOutput { author: author_output, posts: all_posts }, total_count))
+}
+
+/// Fetch a single page of a thread starting from a specific URI.
+///
+/// This is used for efficient pagination - fetches only the posts starting from
+/// a continuation point without re-fetching the entire thread.
+///
+/// # Arguments
+/// * `uri` - The AT URI to start fetching from (e.g., "at://did:plc:xxx/app.bsky.feed.post/yyy")
+/// * `author_did` - The DID of the author whose posts we want to collect
+///
+/// # Returns
+/// A vector of `PostOutput` for the author's posts starting from this URI.
+pub async fn fetch_thread_from_uri(uri: &str, author_did: &str) -> Result<Vec<PostOutput>> {
+    let client = reqwest::Client::new();
+    let response = get_post_thread(&client, uri).await?;
+
+    // Extract author handle from response
+    let author_handle = response.thread.post.author.handle.clone();
+
+    // Collect posts starting from this URI
+    let posts = collect_author_posts(&response.thread, author_did, &author_handle);
+
+    Ok(posts)
+}

@@ -13,8 +13,9 @@ struct Args {
 async fn main() -> Result<()> {
     let args = Args::parse();
 
-    let output = bsky_thread_lib::fetch_thread(&args.url).await?;
+    let (output, total_count) = bsky_thread_lib::fetch_thread_with_total(&args.url).await?;
 
+    eprintln!("Fetched {} posts total (recursive pagination)", total_count);
     println!("{}", serde_json::to_string_pretty(&output)?);
 
     Ok(())
