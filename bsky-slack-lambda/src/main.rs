@@ -178,7 +178,7 @@ async fn handle_bluesky_shortcut(payload: ShortcutPayload) -> Result<ApiGatewayP
 
     // Post first batch (starting from index 1, skipping root at 0)
     let client = reqwest::Client::new();
-    let batch_end = std::cmp::min(BATCH_SIZE, total_count - 1); // First batch ends at index 10 (displays as [11/TOTAL])
+    let batch_end = std::cmp::min(BATCH_SIZE - 1, total_count - 1); // First batch ends at index 9 (displays as [10/TOTAL])
 
     if batch_end >= 1 {
         post_batch(
@@ -195,8 +195,8 @@ async fn handle_bluesky_shortcut(payload: ShortcutPayload) -> Result<ApiGatewayP
     }
 
     // Post "load more" button if there are remaining posts
-    if total_count > BATCH_SIZE + 1 {
-        // More than BATCH_SIZE+1 total posts means more than first batch
+    if total_count > BATCH_SIZE {
+        // More than BATCH_SIZE total posts means more than first batch (9 posts)
         // Get continuation URI (URI of last post we just displayed)
         let continuation_uri = thread.posts[batch_end].uri.clone();
 
@@ -343,11 +343,7 @@ async fn post_load_more_button(
     author_did: &str,
 ) -> Result<()> {
     // Calculate remaining messages
-    let posted_count = if current_batch == 0 {
-        BATCH_SIZE // First batch posts BATCH_SIZE messages (indices 1-10)
-    } else {
-        BATCH_SIZE + current_batch * BATCH_SIZE // BATCH_SIZE from first batch + subsequent batches
-    };
+    let posted_count = (BATCH_SIZE - 1) + current_batch * BATCH_SIZE; // First batch: 9, then +10 per batch
     let remaining = total_count - posted_count - 1; // -1 for root post
     let next_batch_size = std::cmp::min(remaining, BATCH_SIZE);
 
@@ -497,11 +493,9 @@ async fn handle_block_actions(payload: BlockActionsPayload) -> Result<ApiGateway
     let page_end = std::cmp::min(page_start + BATCH_SIZE - 1, posts.len() - 1);
 
     // Calculate logical indices for [N/TOTAL] display
-    let logical_start = if next_batch == 1 {
-        BATCH_SIZE + 1  // After first batch of 10
-    } else {
-        BATCH_SIZE + (next_batch - 1) * BATCH_SIZE + 1
-    };
+    // First batch posts 9 (displayed as [2/31] to [10/31])
+    // Each subsequent batch posts 10
+    let logical_start = next_batch * BATCH_SIZE + 1;
 
     // Post the batch with correct numbering
     post_batch_with_offset(
