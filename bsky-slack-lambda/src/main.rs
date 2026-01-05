@@ -11,7 +11,7 @@ use tracing::{error, info, warn};
 use urlencoding::decode;
 
 const SHORTCUT_CALLBACK_ID: &str = "unroll_bluesky_thread";
-const BATCH_SIZE: usize = 20;
+const BATCH_SIZE: usize = 10;
 const LOAD_MORE_ACTION_ID: &str = "load_more_thread";
 
 type HmacSha256 = Hmac<Sha256>;
@@ -179,7 +179,7 @@ async fn handle_bluesky_shortcut(payload: ShortcutPayload) -> Result<ApiGatewayP
 
     // Post first batch (starting from index 1, skipping root at 0)
     let client = reqwest::Client::new();
-    let batch_end = std::cmp::min(19, total_count - 1); // First batch ends at index 19 (displays as [20/TOTAL])
+    let batch_end = std::cmp::min(BATCH_SIZE, total_count - 1); // First batch ends at index 10 (displays as [11/TOTAL])
 
     if batch_end >= 1 {
         post_batch(
@@ -196,8 +196,8 @@ async fn handle_bluesky_shortcut(payload: ShortcutPayload) -> Result<ApiGatewayP
     }
 
     // Post "load more" button if there are remaining posts
-    if total_count > 20 {
-        // More than 20 total posts means more than first batch of 19
+    if total_count > BATCH_SIZE + 1 {
+        // More than BATCH_SIZE+1 total posts means more than first batch
         post_load_more_button(
             &client,
             &bot_token,
@@ -283,9 +283,9 @@ async fn post_load_more_button(
 ) -> Result<()> {
     // Calculate remaining messages
     let posted_count = if current_batch == 0 {
-        19 // First batch posts 19 messages (indices 1-19)
+        BATCH_SIZE // First batch posts BATCH_SIZE messages (indices 1-10)
     } else {
-        19 + current_batch * BATCH_SIZE // 19 from first batch + subsequent batches
+        BATCH_SIZE + current_batch * BATCH_SIZE // BATCH_SIZE from first batch + subsequent batches
     };
     let remaining = total_count - posted_count - 1; // -1 for root post
     let next_batch_size = std::cmp::min(remaining, BATCH_SIZE);
@@ -424,7 +424,7 @@ async fn handle_block_actions(payload: BlockActionsPayload) -> Result<ApiGateway
     // Calculate next batch range
     let next_batch = state.current_batch + 1;
     let start_idx = if next_batch == 1 {
-        // Batch 1 starts at index 20 (after first batch of 19)
+        // Batch 1 starts at index 10 (after first batch of 10)
         BATCH_SIZE
     } else {
         // Subsequent batches
