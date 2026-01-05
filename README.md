@@ -2,7 +2,7 @@
 
 A Rust toolkit for unrolling Bluesky threads. Includes a CLI tool and a Slack app that posts thread replies to a Slack thread.
 
-![Bluesky Thread Unroller Demo](bluesky-thread-unroller.gif)
+![Bluesky Thread Unroller Demo](bluesky-thread-unroller-pagination-small.gif)
 
 ## Project Structure
 
