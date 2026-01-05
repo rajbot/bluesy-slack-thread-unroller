@@ -90,6 +90,7 @@ cargo lambda build --release --arm64
 # Deploy to AWS
 cargo lambda deploy bsky-slack-lambda \
   --iam-role arn:aws:iam::YOUR_ACCOUNT_ID:role/YOUR_LAMBDA_ROLE \
+  --timeout 15 \
   --env-var SLACK_BOT_TOKEN=xoxb-your-token \
   --env-var SLACK_SIGNING_SECRET=your-signing-secret
 ```
@@ -170,7 +171,12 @@ The bot must be invited to any channel where you want to use it:
 3. Extracts the Bluesky URL from the message text
 4. Fetches the thread from Bluesky's public API
 5. Filters to only include posts by the original author
-6. Posts each post's URL as a threaded reply (Slack auto-unfurls them)
+6. Posts each post's URL as a threaded reply with numbered prefixes (e.g., [2/50], [3/50])
+7. For threads with more than 20 posts:
+   - First batch shows posts [2/TOTAL] through [20/TOTAL] (19 messages)
+   - A "load more" button appears for remaining posts
+   - Clicking the button loads the next batch (up to 20 more posts)
+   - Process continues until all posts are unrolled
 
 ---
 
