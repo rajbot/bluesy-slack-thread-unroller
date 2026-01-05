@@ -167,12 +167,11 @@ async fn handle_bluesky_shortcut(payload: ShortcutPayload) -> Result<ApiGatewayP
 
     info!("Found Bluesky URL: {}", bsky_url);
 
-    // Fetch the thread using the library
-    let thread = bsky_thread_lib::fetch_thread(&bsky_url).await?;
-    let total_count = thread.posts.len();
+    // Recursively fetch all pages to get true total count
+    let (thread, total_count) = bsky_thread_lib::fetch_thread_with_total(&bsky_url).await?;
 
     info!(
-        "Fetched thread with {} posts by {}",
+        "Fetched complete thread with {} posts by {} (recursive fetch)",
         total_count,
         thread.author.handle
     );
@@ -198,6 +197,9 @@ async fn handle_bluesky_shortcut(payload: ShortcutPayload) -> Result<ApiGatewayP
     // Post "load more" button if there are remaining posts
     if total_count > BATCH_SIZE + 1 {
         // More than BATCH_SIZE+1 total posts means more than first batch
+        // Get continuation URI (URI of last post we just displayed)
+        let continuation_uri = thread.posts[batch_end].uri.clone();
+
         post_load_more_button(
             &client,
             &bot_token,
@@ -206,6 +208,8 @@ async fn handle_bluesky_shortcut(payload: ShortcutPayload) -> Result<ApiGatewayP
             &bsky_url,
             0, // current_batch (just completed batch 0)
             total_count,
+            &continuation_uri,
+            &thread.author.did,
         )
         .await?;
     }
@@ -272,6 +276,61 @@ async fn post_batch(
     Ok(())
 }
 
+async fn post_batch_with_offset(
+    client: &reqwest::Client,
+    bot_token: &str,
+    channel_id: &str,
+    thread_ts: &str,
+    posts: &[bsky_thread_lib::PostOutput],
+    start_idx: usize,
+    end_idx: usize,
+    display_start: usize,
+    total_count: usize,
+) -> Result<()> {
+    for (i, post_idx) in (start_idx..=end_idx).enumerate() {
+        let post = &posts[post_idx];
+        let display_num = display_start + i;
+
+        // Add numbered prefix: [12/50] https://bsky.app/...
+        let message_text = format!("[{}/{}] {}", display_num, total_count, post.url);
+
+        let post_request = serde_json::json!({
+            "channel": channel_id,
+            "thread_ts": thread_ts,
+            "text": message_text,
+            "unfurl_links": true,
+            "unfurl_media": true
+        });
+
+        let response = client
+            .post("https://slack.com/api/chat.postMessage")
+            .header("Authorization", format!("Bearer {}", bot_token))
+            .header("Content-Type", "application/json")
+            .json(&post_request)
+            .send()
+            .await?;
+
+        let response_body: Value = response.json().await?;
+
+        if response_body.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+            warn!(
+                "Failed to post message {}: {:?}",
+                display_num,
+                response_body.get("error")
+            );
+        } else {
+            info!("Posted message {} of {}", display_num, total_count);
+        }
+
+        // Small delay to avoid rate limiting (only between posts)
+        if post_idx < end_idx {
+            tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+        }
+    }
+
+    Ok(())
+}
+
 async fn post_load_more_button(
     client: &reqwest::Client,
     bot_token: &str,
@@ -280,6 +339,8 @@ async fn post_load_more_button(
     bsky_url: &str,
     current_batch: usize,
     total_count: usize,
+    continuation_uri: &str,
+    author_did: &str,
 ) -> Result<()> {
     // Calculate remaining messages
     let posted_count = if current_batch == 0 {
@@ -303,6 +364,9 @@ async fn post_load_more_button(
         current_batch,
         thread_ts: thread_ts.to_string(),
         channel_id: channel_id.to_string(),
+        total_count,
+        continuation_uri: continuation_uri.to_string(),
+        author_did: author_did.to_string(),
     };
     let state_json = serde_json::to_string(&state)?;
 
@@ -400,9 +464,9 @@ async fn handle_block_actions(payload: BlockActionsPayload) -> Result<ApiGateway
     let state: LoadMoreState = serde_json::from_str(&action.value)?;
 
     info!(
-        "Loading more messages for batch {} from URL: {}",
+        "Loading batch {} (total: {}) from continuation URI",
         state.current_batch + 1,
-        state.bsky_url
+        state.total_count
     );
 
     // Extract message timestamp to delete the button message
@@ -417,36 +481,48 @@ async fn handle_block_actions(payload: BlockActionsPayload) -> Result<ApiGateway
     let client = reqwest::Client::new();
     delete_message(&client, &bot_token, &state.channel_id, button_message_ts).await?;
 
-    // Re-fetch the thread
-    let thread = bsky_thread_lib::fetch_thread(&state.bsky_url).await?;
-    let total_count = thread.posts.len();
+    // Fetch ONLY the next page starting from continuation URI
+    let posts = bsky_thread_lib::fetch_thread_from_uri(
+        &state.continuation_uri,
+        &state.author_did
+    ).await?;
 
-    // Calculate next batch range
+    // Calculate batch range
     let next_batch = state.current_batch + 1;
-    let start_idx = if next_batch == 1 {
-        // Batch 1 starts at index 10 (after first batch of 10)
-        BATCH_SIZE
-    } else {
-        // Subsequent batches
-        BATCH_SIZE + (next_batch - 1) * BATCH_SIZE
-    };
-    let end_idx = std::cmp::min(start_idx + BATCH_SIZE - 1, total_count - 1);
 
-    // Post the next batch
-    post_batch(
+    // We need to map logical indices to posts in the fetched page
+    // The fetched page starts at continuation_uri (which we already displayed)
+    // So we skip the first post and take the next BATCH_SIZE posts
+    let page_start = 1; // Skip the continuation point (duplicate)
+    let page_end = std::cmp::min(page_start + BATCH_SIZE - 1, posts.len() - 1);
+
+    // Calculate logical indices for [N/TOTAL] display
+    let logical_start = if next_batch == 1 {
+        BATCH_SIZE + 1  // After first batch of 10
+    } else {
+        BATCH_SIZE + (next_batch - 1) * BATCH_SIZE + 1
+    };
+
+    // Post the batch with correct numbering
+    post_batch_with_offset(
         &client,
         &bot_token,
         &state.channel_id,
         &state.thread_ts,
-        &thread.posts,
-        start_idx,
-        end_idx,
-        total_count,
+        &posts,
+        page_start,
+        page_end,
+        logical_start,
+        state.total_count,
     )
     .await?;
 
-    // Post another button if there are more messages
-    if end_idx < total_count - 1 {
+    // Check if more posts remain
+    let logical_end = logical_start + (page_end - page_start);
+    if logical_end < state.total_count {
+        // Get new continuation URI (last post we just displayed)
+        let new_continuation_uri = posts[page_end].uri.clone();
+
         post_load_more_button(
             &client,
             &bot_token,
@@ -454,7 +530,9 @@ async fn handle_block_actions(payload: BlockActionsPayload) -> Result<ApiGateway
             &state.thread_ts,
             &state.bsky_url,
             next_batch,
-            total_count,
+            state.total_count,
+            &new_continuation_uri,
+            &state.author_did,
         )
         .await?;
     }
@@ -557,6 +635,9 @@ struct LoadMoreState {
     current_batch: usize,
     thread_ts: String,
     channel_id: String,
+    total_count: usize,        // True total from recursive fetch
+    continuation_uri: String,  // URI to fetch next page from
+    author_did: String,        // Needed for fetch_thread_from_uri
 }
 
 #[derive(Debug, Deserialize)]
