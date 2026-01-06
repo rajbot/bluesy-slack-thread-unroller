@@ -156,6 +156,13 @@ async fn handle_bluesky_shortcut(payload: ShortcutPayload) -> Result<ApiGatewayP
     let message_ts = extract_message_ts(&payload)?;
     let message_text = extract_message_text(&payload)?;
 
+    // Extract user_id for ephemeral messages
+    let user_id = payload
+        .user
+        .get("id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("Could not extract user ID from payload"))?;
+
     info!(
         "Processing message in channel {} with ts {}",
         channel_id, message_ts
@@ -181,7 +188,7 @@ async fn handle_bluesky_shortcut(payload: ShortcutPayload) -> Result<ApiGatewayP
     let batch_end = std::cmp::min(BATCH_SIZE - 1, total_count - 1); // First batch ends at index 9 (displays as [10/TOTAL])
 
     if batch_end >= 1 {
-        post_batch(
+        let result = post_batch(
             &client,
             &bot_token,
             channel_id,
@@ -191,7 +198,26 @@ async fn handle_bluesky_shortcut(payload: ShortcutPayload) -> Result<ApiGatewayP
             batch_end, // end_idx
             total_count,
         )
-        .await?;
+        .await;
+
+        // Check for not_in_channel error and send ephemeral message
+        if let Err(e) = result {
+            let error_msg = e.to_string();
+            if error_msg.contains("not_in_channel") {
+                info!("Bot not in channel {}, sending ephemeral message to user {}", channel_id, user_id);
+                send_ephemeral_not_in_channel_message(&client, &bot_token, channel_id, user_id).await?;
+
+                // Return success to acknowledge the shortcut
+                return Ok(ApiGatewayProxyResponse {
+                    status_code: 200,
+                    headers: HashMap::new(),
+                    body: None,
+                    is_base64_encoded: false,
+                });
+            }
+            // For other errors, propagate them
+            return Err(e);
+        }
     }
 
     // Post "load more" button if there are remaining posts
@@ -258,10 +284,19 @@ async fn post_batch(
         let response_body: Value = response.json().await?;
 
         if response_body.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+            let error = response_body.get("error").and_then(|v| v.as_str());
+
+            // Check if the error is not_in_channel - if so, fail immediately
+            if error == Some("not_in_channel") {
+                warn!("Bot is not in channel {}, stopping batch", channel_id);
+                return Err(anyhow!("not_in_channel: Bot is not a member of channel {}", channel_id));
+            }
+
+            // For other errors, log and continue
             warn!(
                 "Failed to post message {}: {:?}",
                 i + 1,
-                response_body.get("error")
+                error
             );
         } else {
             info!("Posted message {} of {}", i + 1, total_count);
@@ -313,10 +348,19 @@ async fn post_batch_with_offset(
         let response_body: Value = response.json().await?;
 
         if response_body.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+            let error = response_body.get("error").and_then(|v| v.as_str());
+
+            // Check if the error is not_in_channel - if so, fail immediately
+            if error == Some("not_in_channel") {
+                warn!("Bot is not in channel {}, stopping batch", channel_id);
+                return Err(anyhow!("not_in_channel: Bot is not a member of channel {}", channel_id));
+            }
+
+            // For other errors, log and continue
             warn!(
                 "Failed to post message {}: {:?}",
                 display_num,
-                response_body.get("error")
+                error
             );
         } else {
             info!("Posted message {} of {}", display_num, total_count);
@@ -445,9 +489,59 @@ async fn delete_message(
     Ok(())
 }
 
+async fn send_ephemeral_not_in_channel_message(
+    client: &reqwest::Client,
+    bot_token: &str,
+    channel_id: &str,
+    user_id: &str,
+) -> Result<()> {
+    let message = serde_json::json!({
+        "channel": channel_id,
+        "user": user_id,
+        "text": "I'm not a member of this channel yet! Please invite me first by typing `/invite @Bluesky Thread Unroller` in the channel.",
+        "blocks": [
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": ":warning: *I'm not a member of this channel yet!*\n\nPlease invite me to this channel by typing:\n`/invite @Bluesky Thread Unroller`\n\nThen try the unroll action again."
+                }
+            }
+        ]
+    });
+
+    let response = client
+        .post("https://slack.com/api/chat.postEphemeral")
+        .header("Authorization", format!("Bearer {}", bot_token))
+        .header("Content-Type", "application/json")
+        .json(&message)
+        .send()
+        .await?;
+
+    let response_body: Value = response.json().await?;
+
+    if response_body.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+        warn!(
+            "Failed to send ephemeral message: {:?}",
+            response_body.get("error")
+        );
+    } else {
+        info!("Sent ephemeral not_in_channel message to user {}", user_id);
+    }
+
+    Ok(())
+}
+
 async fn handle_block_actions(payload: BlockActionsPayload) -> Result<ApiGatewayProxyResponse> {
     let bot_token = std::env::var("SLACK_BOT_TOKEN")
         .map_err(|_| anyhow!("SLACK_BOT_TOKEN not set"))?;
+
+    // Extract user_id for ephemeral messages
+    let user_id = payload
+        .user
+        .get("id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("Could not extract user ID from payload"))?;
 
     // Find our action in the actions array
     let action = payload
@@ -498,7 +592,7 @@ async fn handle_block_actions(payload: BlockActionsPayload) -> Result<ApiGateway
     let logical_start = next_batch * BATCH_SIZE + 1;
 
     // Post the batch with correct numbering
-    post_batch_with_offset(
+    let result = post_batch_with_offset(
         &client,
         &bot_token,
         &state.channel_id,
@@ -509,7 +603,26 @@ async fn handle_block_actions(payload: BlockActionsPayload) -> Result<ApiGateway
         logical_start,
         state.total_count,
     )
-    .await?;
+    .await;
+
+    // Check for not_in_channel error and send ephemeral message
+    if let Err(e) = result {
+        let error_msg = e.to_string();
+        if error_msg.contains("not_in_channel") {
+            info!("Bot not in channel {}, sending ephemeral message to user {}", state.channel_id, user_id);
+            send_ephemeral_not_in_channel_message(&client, &bot_token, &state.channel_id, user_id).await?;
+
+            // Return success to acknowledge the button action
+            return Ok(ApiGatewayProxyResponse {
+                status_code: 200,
+                headers: HashMap::new(),
+                body: None,
+                is_base64_encoded: false,
+            });
+        }
+        // For other errors, propagate them
+        return Err(e);
+    }
 
     // Check if more posts remain
     let logical_end = logical_start + (page_end - page_start);
