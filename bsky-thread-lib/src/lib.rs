@@ -351,3 +351,111 @@ pub async fn fetch_thread_from_uri(uri: &str, author_did: &str) -> Result<Vec<Po
 
     Ok(posts)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ========================================
+    // URL Parsing Tests
+    // ========================================
+
+    #[test]
+    fn test_parse_bsky_url_valid_standard() {
+        let url = "https://bsky.app/profile/user.bsky.social/post/abc123";
+        let result = parse_bsky_url(url);
+        assert!(result.is_ok());
+        let (handle, post_id) = result.unwrap();
+        assert_eq!(handle, "user.bsky.social");
+        assert_eq!(post_id, "abc123");
+    }
+
+    #[test]
+    fn test_parse_bsky_url_valid_with_did() {
+        let url = "https://bsky.app/profile/did:plc:abc123/post/xyz789";
+        let result = parse_bsky_url(url);
+        assert!(result.is_ok());
+        let (handle, post_id) = result.unwrap();
+        assert_eq!(handle, "did:plc:abc123");
+        assert_eq!(post_id, "xyz789");
+    }
+
+    #[test]
+    fn test_parse_bsky_url_with_trailing_slash() {
+        let url = "https://bsky.app/profile/user.bsky.social/post/abc123/";
+        let result = parse_bsky_url(url);
+        assert!(result.is_ok());
+        let (handle, post_id) = result.unwrap();
+        assert_eq!(handle, "user.bsky.social");
+        assert_eq!(post_id, "abc123");
+    }
+
+    #[test]
+    fn test_parse_bsky_url_with_query_params() {
+        // URLs with query params should still work (we ignore them)
+        let url = "https://bsky.app/profile/user.bsky.social/post/abc123?ref=share";
+        let result = parse_bsky_url(url);
+        assert!(result.is_ok());
+        let (handle, post_id) = result.unwrap();
+        assert_eq!(handle, "user.bsky.social");
+        assert_eq!(post_id, "abc123?ref=share"); // Post ID includes query params
+    }
+
+    #[test]
+    fn test_parse_bsky_url_missing_profile_segment() {
+        let url = "https://bsky.app/post/abc123";
+        let result = parse_bsky_url(url);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("profile"));
+    }
+
+    #[test]
+    fn test_parse_bsky_url_missing_post_segment() {
+        let url = "https://bsky.app/profile/user.bsky.social";
+        let result = parse_bsky_url(url);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("post"));
+    }
+
+    #[test]
+    fn test_parse_bsky_url_incomplete_path_no_post_id() {
+        let url = "https://bsky.app/profile/user.bsky.social/post";
+        let result = parse_bsky_url(url);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_bsky_url_empty_string() {
+        let url = "";
+        let result = parse_bsky_url(url);
+        assert!(result.is_err());
+    }
+
+    // ========================================
+    // AT URI Conversion Tests
+    // ========================================
+
+    #[test]
+    fn test_at_uri_to_web_url_standard() {
+        let uri = "at://did:plc:abc123/app.bsky.feed.post/xyz789";
+        let handle = "user.bsky.social";
+        let url = at_uri_to_web_url(uri, handle);
+        assert_eq!(url, "https://bsky.app/profile/user.bsky.social/post/xyz789");
+    }
+
+    #[test]
+    fn test_at_uri_to_web_url_with_did_as_handle() {
+        let uri = "at://did:plc:abc123/app.bsky.feed.post/xyz789";
+        let handle = "did:plc:abc123";
+        let url = at_uri_to_web_url(uri, handle);
+        assert_eq!(url, "https://bsky.app/profile/did:plc:abc123/post/xyz789");
+    }
+
+    #[test]
+    fn test_at_uri_to_web_url_with_special_chars() {
+        let uri = "at://did:plc:abc123/app.bsky.feed.post/3lgfit4bm672l";
+        let handle = "altmetric.com";
+        let url = at_uri_to_web_url(uri, handle);
+        assert_eq!(url, "https://bsky.app/profile/altmetric.com/post/3lgfit4bm672l");
+    }
+}

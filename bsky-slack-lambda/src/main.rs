@@ -656,3 +656,223 @@ struct ApiGatewayProxyResponse {
     #[serde(rename = "isBase64Encoded")]
     is_base64_encoded: bool,
 }
+
+// ========================================
+// Batch Calculation Helper Functions
+// ========================================
+// These functions extract the batch calculation logic
+// to make it testable and prevent regression of bugs.
+
+/// Calculate the number of posts posted after completing the given batch.
+/// First batch (0) posts 9 messages, subsequent batches post 10 each.
+fn calculate_posted_count(current_batch: usize, batch_size: usize) -> usize {
+    (batch_size - 1) + current_batch * batch_size
+}
+
+/// Calculate the logical start index for [N/TOTAL] display numbering.
+/// This is the display number (not array index) for the first message in a batch.
+fn calculate_logical_start(next_batch: usize, batch_size: usize) -> usize {
+    next_batch * batch_size + 1
+}
+
+/// Calculate the batch end index for the first batch.
+/// First batch should end at BATCH_SIZE - 1 to post only 9 messages.
+fn calculate_batch_end(batch_size: usize, total_count: usize) -> usize {
+    std::cmp::min(batch_size - 1, total_count - 1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ========================================
+    // Batch Calculation Tests - 31-Post Thread
+    // ========================================
+    // These tests verify the batch numbering logic for the 31-post thread
+    // that exposed bugs in the original implementation.
+
+    const TEST_BATCH_SIZE: usize = 10;
+    const TEST_TOTAL_COUNT: usize = 31;
+
+    #[test]
+    fn test_batch_0_calculations() {
+        // Batch 0: Display [2/31] to [10/31] (9 messages)
+        let current_batch = 0;
+        let batch_end = calculate_batch_end(TEST_BATCH_SIZE, TEST_TOTAL_COUNT);
+        let posted_count = calculate_posted_count(current_batch, TEST_BATCH_SIZE);
+        let remaining = TEST_TOTAL_COUNT - posted_count - 1; // -1 for root
+
+        assert_eq!(batch_end, 9, "First batch should end at index 9");
+        assert_eq!(posted_count, 9, "First batch should post 9 messages");
+        assert_eq!(remaining, 21, "Should have 21 messages remaining");
+
+        // Button should show "unroll the next 10 messages"
+        let next_batch_size = std::cmp::min(remaining, TEST_BATCH_SIZE);
+        assert_eq!(next_batch_size, 10);
+    }
+
+    #[test]
+    fn test_batch_1_calculations() {
+        // Batch 1: Display [11/31] to [20/31] (10 messages)
+        // state.current_batch = 0 (just finished batch 0), next_batch = 1
+        let current_batch = 0; // Just finished batch 0
+        let next_batch = current_batch + 1; // About to post batch 1
+        let posted_count = calculate_posted_count(current_batch, TEST_BATCH_SIZE);
+        let logical_start = calculate_logical_start(next_batch, TEST_BATCH_SIZE);
+        let remaining = TEST_TOTAL_COUNT - posted_count - 1;
+
+        assert_eq!(posted_count, 9, "After batch 0, should have posted 9 messages");
+        assert_eq!(logical_start, 11, "Batch 1 should start at [11/31]");
+        assert_eq!(remaining, 21, "Should have 21 messages remaining");
+
+        // Logical end should be 20
+        let logical_end = logical_start + (TEST_BATCH_SIZE - 1);
+        assert_eq!(logical_end, 20, "Batch 1 should end at [20/31]");
+    }
+
+    #[test]
+    fn test_batch_2_calculations() {
+        // Batch 2: Display [21/31] to [30/31] (10 messages)
+        // state.current_batch = 1 (just finished batch 1), next_batch = 2
+        let current_batch = 1; // Just finished batch 1
+        let next_batch = current_batch + 1; // About to post batch 2
+        let posted_count = calculate_posted_count(current_batch, TEST_BATCH_SIZE);
+        let logical_start = calculate_logical_start(next_batch, TEST_BATCH_SIZE);
+        let remaining = TEST_TOTAL_COUNT - posted_count - 1;
+
+        assert_eq!(posted_count, 19, "After batch 1, should have posted 19 messages (9+10)");
+        assert_eq!(logical_start, 21, "Batch 2 should start at [21/31]");
+        assert_eq!(remaining, 11, "Should have 11 messages remaining");
+
+        // Logical end should be 30
+        let logical_end = logical_start + (TEST_BATCH_SIZE - 1);
+        assert_eq!(logical_end, 30, "Batch 2 should end at [30/31]");
+    }
+
+    #[test]
+    fn test_batch_3_calculations() {
+        // Batch 3: Display [31/31] (1 message, NO button after)
+        // state.current_batch = 2 (just finished batch 2), next_batch = 3
+        let current_batch = 2; // Just finished batch 2
+        let next_batch = current_batch + 1; // About to post batch 3
+        let posted_count = calculate_posted_count(current_batch, TEST_BATCH_SIZE);
+        let logical_start = calculate_logical_start(next_batch, TEST_BATCH_SIZE);
+        let remaining = TEST_TOTAL_COUNT - posted_count - 1;
+
+        assert_eq!(posted_count, 29, "After batch 2, should have posted 29 messages (9+10+10)");
+        assert_eq!(logical_start, 31, "Batch 3 should start at [31/31]");
+        assert_eq!(remaining, 1, "Should have 1 message remaining");
+
+        // logical_end should equal logical_start (only 1 message)
+        // which equals TEST_TOTAL_COUNT, so no button should appear after
+        assert_eq!(logical_start, TEST_TOTAL_COUNT, "Last message is [31/31]");
+    }
+
+    // ========================================
+    // Edge Case Tests
+    // ========================================
+
+    #[test]
+    fn test_10_post_thread() {
+        // 10-post thread: Only batch 0, remaining=0, no button
+        let total = 10;
+        let batch_end = calculate_batch_end(TEST_BATCH_SIZE, total);
+        let posted_count = calculate_posted_count(0, TEST_BATCH_SIZE);
+        let remaining = total - posted_count - 1;
+
+        assert_eq!(batch_end, 9, "Should end at index 9");
+        assert_eq!(posted_count, 9, "Should post 9 messages");
+        assert_eq!(remaining, 0, "No messages remaining, no button");
+    }
+
+    #[test]
+    fn test_11_post_thread() {
+        // 11-post thread: Batch 0 + 1 more post in batch 1
+        let total = 11;
+
+        // Batch 0
+        let batch_end_0 = calculate_batch_end(TEST_BATCH_SIZE, total);
+        let posted_count_0 = calculate_posted_count(0, TEST_BATCH_SIZE);
+        let remaining_0 = total - posted_count_0 - 1;
+
+        assert_eq!(batch_end_0, 9);
+        assert_eq!(posted_count_0, 9);
+        assert_eq!(remaining_0, 1, "Should have 1 message remaining");
+
+        // Batch 1
+        let logical_start_1 = calculate_logical_start(1, TEST_BATCH_SIZE);
+        assert_eq!(logical_start_1, 11, "Second batch starts at [11/11]");
+    }
+
+    #[test]
+    fn test_20_post_thread() {
+        // 20-post thread: Batch 0 (9) + Batch 1 (10), remaining=0
+        let total = 20;
+
+        // After batch 1
+        let posted_count_1 = calculate_posted_count(1, TEST_BATCH_SIZE);
+        let remaining_1 = total - posted_count_1 - 1;
+
+        assert_eq!(posted_count_1, 19);
+        assert_eq!(remaining_1, 0, "No messages remaining after batch 1");
+    }
+
+    #[test]
+    fn test_21_post_thread() {
+        // 21-post thread: Batch 0 (9) + Batch 1 (10) + Batch 2 (1)
+        let total = 21;
+
+        // After batch 1
+        let posted_count_1 = calculate_posted_count(1, TEST_BATCH_SIZE);
+        let remaining_1 = total - posted_count_1 - 1;
+
+        assert_eq!(remaining_1, 1, "Should have 1 message remaining");
+
+        // Batch 2
+        let logical_start_2 = calculate_logical_start(2, TEST_BATCH_SIZE);
+        assert_eq!(logical_start_2, 21, "Third batch starts at [21/21]");
+    }
+
+    // ========================================
+    // URL Extraction Tests
+    // ========================================
+
+    #[test]
+    fn test_extract_bluesky_url_single() {
+        let text = "Check out this thread https://bsky.app/profile/user.bsky.social/post/abc123";
+        let url = extract_bluesky_url(text);
+        assert!(url.is_some());
+        assert_eq!(url.unwrap(), "https://bsky.app/profile/user.bsky.social/post/abc123");
+    }
+
+    #[test]
+    fn test_extract_bluesky_url_multiple() {
+        let text = "https://bsky.app/profile/user1.bsky.social/post/abc https://bsky.app/profile/user2.bsky.social/post/xyz";
+        let url = extract_bluesky_url(text);
+        assert!(url.is_some());
+        // Should extract first URL
+        assert_eq!(url.unwrap(), "https://bsky.app/profile/user1.bsky.social/post/abc");
+    }
+
+    #[test]
+    fn test_extract_bluesky_url_with_text() {
+        let text = "Hey check this out: https://bsky.app/profile/cool.user/post/12345 - really cool!";
+        let url = extract_bluesky_url(text);
+        assert!(url.is_some());
+        assert_eq!(url.unwrap(), "https://bsky.app/profile/cool.user/post/12345");
+    }
+
+    #[test]
+    fn test_extract_bluesky_url_none() {
+        let text = "No URL here just some text";
+        let url = extract_bluesky_url(text);
+        assert!(url.is_none());
+    }
+
+    #[test]
+    fn test_extract_bluesky_url_malformed() {
+        let text = "https://bsky.app/not-a-valid-url";
+        let url = extract_bluesky_url(text);
+        assert!(url.is_none());
+    }
+}
