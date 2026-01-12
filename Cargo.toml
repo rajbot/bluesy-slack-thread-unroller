@@ -3,5 +3,6 @@ members = [
     "bsky-thread-lib",
     "bsky-thread-cli",
     "bsky-slack-lambda",
+    "bsky-video-dl",
 ]
 resolver = "2"
