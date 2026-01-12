@@ -9,7 +9,8 @@ A Rust toolkit for unrolling Bluesky threads. Includes a CLI tool and a Slack ap
 ```
 bsky-thread-unroller/
 ├── bsky-thread-lib/        # Shared library for fetching Bluesky threads
-├── bsky-thread-cli/        # CLI tool
+├── bsky-thread-cli/        # CLI tool for unrolling threads
+├── bsky-video-dl/          # CLI tool for downloading videos
 └── bsky-slack-lambda/      # Slack app (AWS Lambda)
 ```
 
@@ -28,6 +29,36 @@ cargo build --release
 ```
 
 Outputs JSON with the thread author's posts only (filters out other replies).
+
+---
+
+## Video Downloader
+
+Download videos from Bluesky posts. Handles HLS streaming by downloading and concatenating video segments.
+
+### Build
+
+```bash
+cargo build --release -p bsky-video-dl
+```
+
+### Usage
+
+```bash
+# Download video as .ts file (filename auto-generated from post ID)
+./target/release/bsky-video-dl 'https://bsky.app/profile/user.bsky.social/post/xyz'
+
+# Download and convert to MP4 (requires ffmpeg)
+./target/release/bsky-video-dl --mp4 'https://bsky.app/profile/user.bsky.social/post/xyz'
+
+# Custom output filename
+./target/release/bsky-video-dl -o my_video.ts 'https://bsky.app/profile/user.bsky.social/post/xyz'
+
+# Verbose output
+./target/release/bsky-video-dl -v 'https://bsky.app/profile/user.bsky.social/post/xyz'
+```
+
+The tool automatically selects the highest quality available (e.g., 720p over 360p).
 
 ---
 
