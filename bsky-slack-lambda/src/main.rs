@@ -375,30 +375,93 @@ async fn upload_file_to_slack(
     filename: &str,
     content: Vec<u8>,
 ) -> Result<()> {
-    use reqwest::multipart::{Form, Part};
+    // Use Slack's newer upload flow:
+    // 1. Get upload URL from files.getUploadURLExternal
+    // 2. Upload file to that URL
+    // 3. Complete upload with files.completeUploadExternal
 
-    let file_part = Part::bytes(content)
-        .file_name(filename.to_string())
-        .mime_str("video/mp4")?;
+    let content_len = content.len();
 
-    let form = Form::new()
-        .text("channels", channel_id.to_string())
-        .text("thread_ts", thread_ts.to_string())
-        .text("filename", filename.to_string())
-        .text("title", filename.to_string())
-        .part("file", file_part);
-
-    let response = client
-        .post("https://slack.com/api/files.upload")
+    // Step 1: Get upload URL
+    let get_url_response = client
+        .get("https://slack.com/api/files.getUploadURLExternal")
         .header("Authorization", format!("Bearer {}", bot_token))
-        .multipart(form)
+        .query(&[
+            ("filename", filename),
+            ("length", &content_len.to_string()),
+        ])
         .send()
         .await?;
 
-    let response_body: Value = response.json().await?;
+    let get_url_body: Value = get_url_response.json().await?;
 
-    if response_body.get("ok").and_then(|v| v.as_bool()) != Some(true) {
-        let error = response_body
+    if get_url_body.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+        let error = get_url_body
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown error");
+        let needed = get_url_body
+            .get("needed")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        if !needed.is_empty() {
+            return Err(anyhow!("Slack API error: {} (needed scope: {})", error, needed));
+        }
+        return Err(anyhow!("Slack API error: {}", error));
+    }
+
+    let upload_url = get_url_body
+        .get("upload_url")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("No upload_url in response"))?;
+
+    let file_id = get_url_body
+        .get("file_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("No file_id in response"))?;
+
+    info!("Got upload URL for file_id: {}", file_id);
+
+    // Step 2: Upload the file to the external URL
+    let upload_response = client
+        .post(upload_url)
+        .header("Content-Type", "video/mp4")
+        .body(content)
+        .send()
+        .await?;
+
+    if !upload_response.status().is_success() {
+        return Err(anyhow!(
+            "Failed to upload file: HTTP {}",
+            upload_response.status()
+        ));
+    }
+
+    info!("Uploaded file to external URL");
+
+    // Step 3: Complete the upload and share to channel
+    let complete_request = serde_json::json!({
+        "files": [{
+            "id": file_id,
+            "title": filename,
+        }],
+        "channel_id": channel_id,
+        "thread_ts": thread_ts,
+    });
+
+    let complete_response = client
+        .post("https://slack.com/api/files.completeUploadExternal")
+        .header("Authorization", format!("Bearer {}", bot_token))
+        .header("Content-Type", "application/json")
+        .json(&complete_request)
+        .send()
+        .await?;
+
+    let complete_body: Value = complete_response.json().await?;
+
+    if complete_body.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+        let error = complete_body
             .get("error")
             .and_then(|v| v.as_str())
             .unwrap_or("unknown error");
@@ -407,9 +470,18 @@ async fn upload_file_to_slack(
             return Err(anyhow!("not_in_channel: Bot is not a member of channel {}", channel_id));
         }
 
+        let needed = complete_body
+            .get("needed")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        if !needed.is_empty() {
+            return Err(anyhow!("Slack API error: {} (needed scope: {})", error, needed));
+        }
         return Err(anyhow!("Slack API error: {}", error));
     }
 
+    info!("Completed file upload to channel");
     Ok(())
 }
 
