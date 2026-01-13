@@ -11,6 +11,7 @@ use tracing::{error, info, warn};
 use urlencoding::decode;
 
 const SHORTCUT_CALLBACK_ID: &str = "unroll_bluesky_thread";
+const VIDEO_SHORTCUT_CALLBACK_ID: &str = "import_video";
 const BATCH_SIZE: usize = 10;
 const LOAD_MORE_ACTION_ID: &str = "load_more_thread";
 
@@ -103,6 +104,10 @@ async fn process_request(
             if payload.callback_id.as_deref() == Some(SHORTCUT_CALLBACK_ID) {
                 info!("Received unroll_bluesky_thread shortcut");
                 return handle_bluesky_shortcut(payload).await;
+            }
+            if payload.callback_id.as_deref() == Some(VIDEO_SHORTCUT_CALLBACK_ID) {
+                info!("Received import_video shortcut");
+                return handle_video_import(payload).await;
             }
         }
     }
@@ -246,6 +251,193 @@ async fn handle_bluesky_shortcut(payload: ShortcutPayload) -> Result<ApiGatewayP
         body: None, // Empty body acknowledges the shortcut
         is_base64_encoded: false,
     })
+}
+
+async fn handle_video_import(payload: ShortcutPayload) -> Result<ApiGatewayProxyResponse> {
+    let bot_token = std::env::var("SLACK_BOT_TOKEN")
+        .map_err(|_| anyhow!("SLACK_BOT_TOKEN not set"))?;
+
+    // Extract data using helper functions
+    let channel_id = extract_channel_id(&payload)?;
+    let message_ts = extract_message_ts(&payload)?;
+    let message_text = extract_message_text(&payload)?;
+
+    // Extract response_url for sending messages back to user
+    let response_url = payload
+        .response_url
+        .as_ref()
+        .ok_or_else(|| anyhow!("Could not extract response_url from payload"))?;
+
+    info!(
+        "Processing video import in channel {} with ts {}",
+        channel_id, message_ts
+    );
+
+    // Find Bluesky URL in the message
+    let bsky_url = extract_bluesky_url(message_text)
+        .ok_or_else(|| anyhow!("No Bluesky URL found in message"))?;
+
+    info!("Found Bluesky URL: {}", bsky_url);
+
+    let client = reqwest::Client::new();
+
+    // Fetch video info from Bluesky
+    let video_info = match bsky_video_lib::fetch_video_info(&client, &bsky_url).await {
+        Ok(info) => info,
+        Err(e) => {
+            warn!("Failed to fetch video info: {}", e);
+            send_ephemeral_error(&client, response_url, &format!("Could not find video in post: {}", e)).await?;
+            return Ok(ApiGatewayProxyResponse {
+                status_code: 200,
+                headers: HashMap::new(),
+                body: None,
+                is_base64_encoded: false,
+            });
+        }
+    };
+
+    info!("Found video, downloading from playlist: {}", video_info.playlist_url);
+
+    // Download video to memory
+    let ts_data = match bsky_video_lib::download_video_to_memory(&client, &video_info.playlist_url).await {
+        Ok(data) => data,
+        Err(e) => {
+            warn!("Failed to download video: {}", e);
+            send_ephemeral_error(&client, response_url, &format!("Failed to download video: {}", e)).await?;
+            return Ok(ApiGatewayProxyResponse {
+                status_code: 200,
+                headers: HashMap::new(),
+                body: None,
+                is_base64_encoded: false,
+            });
+        }
+    };
+
+    info!("Downloaded {} bytes of TS data", ts_data.len());
+
+    // Convert to MP4
+    let mp4_data = match bsky_video_lib::convert_to_mp4(&ts_data) {
+        Ok(data) => data,
+        Err(e) => {
+            warn!("Failed to convert video to MP4: {}", e);
+            send_ephemeral_error(&client, response_url, &format!("Failed to convert video: {}", e)).await?;
+            return Ok(ApiGatewayProxyResponse {
+                status_code: 200,
+                headers: HashMap::new(),
+                body: None,
+                is_base64_encoded: false,
+            });
+        }
+    };
+
+    info!("Converted to {} bytes of MP4 data", mp4_data.len());
+
+    // Upload to Slack
+    let filename = format!("{}.mp4", video_info.post_id);
+    let result = upload_file_to_slack(
+        &client,
+        &bot_token,
+        channel_id,
+        message_ts,
+        &filename,
+        mp4_data,
+    )
+    .await;
+
+    // Check for not_in_channel error
+    if let Err(e) = result {
+        let error_msg = e.to_string();
+        if error_msg.contains("not_in_channel") || error_msg.contains("channel_not_found") {
+            info!("Bot not in channel {}, sending message via response_url", channel_id);
+            send_not_in_channel_message(&client, response_url).await?;
+        } else {
+            warn!("Failed to upload video: {}", e);
+            send_ephemeral_error(&client, response_url, &format!("Failed to upload video: {}", e)).await?;
+        }
+    } else {
+        info!("Successfully uploaded video to Slack");
+    }
+
+    // Return success acknowledgment
+    Ok(ApiGatewayProxyResponse {
+        status_code: 200,
+        headers: HashMap::new(),
+        body: None,
+        is_base64_encoded: false,
+    })
+}
+
+async fn upload_file_to_slack(
+    client: &reqwest::Client,
+    bot_token: &str,
+    channel_id: &str,
+    thread_ts: &str,
+    filename: &str,
+    content: Vec<u8>,
+) -> Result<()> {
+    use reqwest::multipart::{Form, Part};
+
+    let file_part = Part::bytes(content)
+        .file_name(filename.to_string())
+        .mime_str("video/mp4")?;
+
+    let form = Form::new()
+        .text("channels", channel_id.to_string())
+        .text("thread_ts", thread_ts.to_string())
+        .text("filename", filename.to_string())
+        .text("title", filename.to_string())
+        .part("file", file_part);
+
+    let response = client
+        .post("https://slack.com/api/files.upload")
+        .header("Authorization", format!("Bearer {}", bot_token))
+        .multipart(form)
+        .send()
+        .await?;
+
+    let response_body: Value = response.json().await?;
+
+    if response_body.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+        let error = response_body
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown error");
+
+        if error == "not_in_channel" || error == "channel_not_found" {
+            return Err(anyhow!("not_in_channel: Bot is not a member of channel {}", channel_id));
+        }
+
+        return Err(anyhow!("Slack API error: {}", error));
+    }
+
+    Ok(())
+}
+
+async fn send_ephemeral_error(
+    client: &reqwest::Client,
+    response_url: &str,
+    error_message: &str,
+) -> Result<()> {
+    let message = serde_json::json!({
+        "response_type": "ephemeral",
+        "text": error_message,
+    });
+
+    let response = client
+        .post(response_url)
+        .header("Content-Type", "application/json")
+        .json(&message)
+        .send()
+        .await?;
+
+    if !response.status().is_success() {
+        warn!(
+            "Failed to send error message via response_url: status {}",
+            response.status()
+        );
+    }
+
+    Ok(())
 }
 
 async fn post_batch(

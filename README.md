@@ -9,6 +9,7 @@ A Rust toolkit for unrolling Bluesky threads. Includes a CLI tool and a Slack ap
 ```
 bsky-thread-unroller/
 ├── bsky-thread-lib/        # Shared library for fetching Bluesky threads
+├── bsky-video-lib/         # Shared library for downloading Bluesky videos
 ├── bsky-thread-cli/        # CLI tool for unrolling threads
 ├── bsky-video-dl/          # CLI tool for downloading videos
 └── bsky-slack-lambda/      # Slack app (AWS Lambda)
@@ -64,7 +65,10 @@ The tool automatically selects the highest quality available (e.g., 720p over 36
 
 ## Slack App Setup
 
-The Slack app uses a message shortcut called "Unroll Bluesky Thread". When triggered on a message containing a Bluesky URL, it fetches the thread and posts each post as a reply in a Slack thread.
+The Slack app provides two message shortcuts:
+
+1. **Unroll Bluesky Thread** - Fetches a thread and posts each reply in a Slack thread
+2. **Import Video** - Downloads a video from a Bluesky post and uploads it to Slack
 
 ### Prerequisites
 
@@ -82,7 +86,7 @@ The Slack app uses a message shortcut called "Unroll Bluesky Thread". When trigg
 3. Enter app name (e.g., "Bluesky Thread Unroller") and select your workspace
 4. Click **Create App**
 
-### Step 2: Configure Message Shortcut
+### Step 2: Configure Message Shortcuts
 
 1. In the left sidebar, click **Interactivity & Shortcuts**
 2. Toggle **Interactivity** to **On**
@@ -93,13 +97,18 @@ The Slack app uses a message shortcut called "Unroll Bluesky Thread". When trigg
    - **Short Description**: `Unroll a Bluesky thread into Slack replies`
    - **Callback ID**: `unroll_bluesky_thread` (must match exactly)
 6. Click **Create**
-7. Leave the **Request URL** blank for now (we'll set it after deploying Lambda)
+7. Create a second shortcut for video import:
+   - **Name**: `Import Video`
+   - **Short Description**: `Download and import video from Bluesky post`
+   - **Callback ID**: `import_video` (must match exactly)
+8. Leave the **Request URL** blank for now (we'll set it after deploying Lambda)
 
 ### Step 3: Add Bot Permissions
 
 1. In the left sidebar, click **OAuth & Permissions**
 2. Under **Scopes** → **Bot Token Scopes**, add:
    - `chat:write` - Post messages
+   - `files:write` - Upload files (required for video import)
    - `links:read` - Read URLs in messages
    - `links:write` - Required for Slack to unfurl links in bot messages
 3. Scroll up and click **Install to Workspace**
@@ -121,7 +130,8 @@ cargo lambda build --release --arm64
 # Deploy to AWS
 cargo lambda deploy bsky-slack-lambda \
   --iam-role arn:aws:iam::YOUR_ACCOUNT_ID:role/YOUR_LAMBDA_ROLE \
-  --timeout 15 \
+  --timeout 60 \
+  --memory 512 \
   --env-var SLACK_BOT_TOKEN=xoxb-your-token \
   --env-var SLACK_SIGNING_SECRET=your-signing-secret
 ```
@@ -197,6 +207,8 @@ The bot must be invited to any channel where you want to use it:
 
 ## How It Works
 
+### Unroll Bluesky Thread
+
 1. User triggers "Unroll Bluesky Thread" shortcut on a message
 2. Lambda receives the request and verifies the Slack signature
 3. Extracts the Bluesky URL from the message text
@@ -208,6 +220,14 @@ The bot must be invited to any channel where you want to use it:
    - A "load more" button appears for remaining posts
    - Clicking the button loads the next batch (up to 20 more posts)
    - Process continues until all posts are unrolled
+
+### Import Video
+
+1. User triggers "Import Video" shortcut on a message containing a Bluesky post URL
+2. Lambda extracts the Bluesky URL and fetches video metadata
+3. Downloads HLS video segments from Bluesky's CDN
+4. Converts MPEG-TS to MP4 format (pure Rust, no ffmpeg)
+5. Uploads the MP4 file to Slack as a threaded reply
 
 ---
 
