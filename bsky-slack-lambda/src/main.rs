@@ -19,7 +19,6 @@ const BATCH_SIZE: usize = 10;
 const LOAD_MORE_ACTION_ID: &str = "load_more_thread";
 
 type HmacSha256 = Hmac<Sha256>;
-type StreamSender = lambda_runtime::streaming::Sender;
 
 /// Represents work to be done in the background after returning 200 OK
 enum Work {
@@ -77,11 +76,14 @@ async fn handle_request(
     match prepare_work(api_request).await {
         Ok(work) => {
             // Create streaming channel - this returns immediately
-            let (tx, rx) = channel();
+            let (_tx, rx) = channel();
+            // Drop tx immediately so the stream closes and HTTP 200 is sent to Slack
+            // The background work continues independently
+            drop(_tx);
 
-            // Spawn background work
+            // Spawn background work (doesn't need the sender)
             tokio::spawn(async move {
-                execute_work(work, tx).await;
+                execute_work(work).await;
             });
 
             // Return 200 OK immediately via stream
@@ -256,7 +258,7 @@ fn prepare_load_more_work(payload: BlockActionsPayload) -> Result<Work> {
 }
 
 /// Execute the prepared work in the background
-async fn execute_work(work: Work, _tx: StreamSender) {
+async fn execute_work(work: Work) {
     match work {
         Work::ThreadUnroll {
             bot_token,
