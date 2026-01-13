@@ -1,4 +1,6 @@
 use anyhow::{anyhow, Result};
+use aws_sdk_lambda::primitives::Blob;
+use aws_sdk_lambda::types::InvocationType;
 use base64::Engine;
 use hmac::{Hmac, Mac};
 use lambda_runtime::{service_fn, Error as LambdaError, LambdaEvent};
@@ -7,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::Sha256;
 use std::collections::HashMap;
+use std::sync::OnceLock;
 use tracing::{error, info, warn};
 use urlencoding::decode;
 
@@ -14,6 +17,38 @@ const SHORTCUT_CALLBACK_ID: &str = "unroll_bluesky_thread";
 const VIDEO_SHORTCUT_CALLBACK_ID: &str = "import_video";
 const BATCH_SIZE: usize = 10;
 const LOAD_MORE_ACTION_ID: &str = "load_more_thread";
+
+// Global Lambda client (initialized once)
+static LAMBDA_CLIENT: OnceLock<aws_sdk_lambda::Client> = OnceLock::new();
+
+/// Background task types for async Lambda self-invocation
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "background_task_type")]
+enum BackgroundTask {
+    #[serde(rename = "thread_unroll")]
+    ThreadUnroll {
+        bot_token: String,
+        channel_id: String,
+        message_ts: String,
+        message_text: String,
+        response_url: String,
+    },
+    #[serde(rename = "video_import")]
+    VideoImport {
+        bot_token: String,
+        channel_id: String,
+        message_ts: String,
+        message_text: String,
+        response_url: String,
+    },
+    #[serde(rename = "load_more")]
+    LoadMore {
+        bot_token: String,
+        state: LoadMoreState,
+        button_message_ts: String,
+        response_url: String,
+    },
+}
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -28,15 +63,36 @@ async fn main() -> std::result::Result<(), LambdaError> {
 
     info!("Bluesky Thread Unroller Lambda starting");
 
+    // Initialize AWS SDK Lambda client
+    let config = aws_config::load_from_env().await;
+    let lambda_client = aws_sdk_lambda::Client::new(&config);
+    LAMBDA_CLIENT.set(lambda_client).ok();
+
     lambda_runtime::run(service_fn(handle_request)).await
 }
 
 async fn handle_request(
-    event: LambdaEvent<ApiGatewayProxyRequest>,
+    event: LambdaEvent<Value>,
 ) -> std::result::Result<ApiGatewayProxyResponse, LambdaError> {
     let (request, _context) = event.into_parts();
 
-    match process_request(request).await {
+    // Check if this is a background task invocation (async self-invocation)
+    if let Ok(task) = serde_json::from_value::<BackgroundTask>(request.clone()) {
+        info!("Executing background task");
+        execute_background_task(task).await;
+        return Ok(ApiGatewayProxyResponse {
+            status_code: 200,
+            headers: HashMap::new(),
+            body: None,
+            is_base64_encoded: false,
+        });
+    }
+
+    // Otherwise, parse as API Gateway request from Slack
+    let api_request: ApiGatewayProxyRequest = serde_json::from_value(request)
+        .map_err(|e| LambdaError::from(format!("Failed to parse request: {}", e)))?;
+
+    match process_request(api_request).await {
         Ok(response) => Ok(response),
         Err(e) => {
             error!("Error processing request: {}", e);
@@ -48,6 +104,65 @@ async fn handle_request(
             })
         }
     }
+}
+
+/// Execute a background task (called from async self-invocation)
+async fn execute_background_task(task: BackgroundTask) {
+    match task {
+        BackgroundTask::ThreadUnroll {
+            bot_token,
+            channel_id,
+            message_ts,
+            message_text,
+            response_url,
+        } => {
+            process_thread_unroll(bot_token, channel_id, message_ts, message_text, response_url)
+                .await;
+        }
+        BackgroundTask::VideoImport {
+            bot_token,
+            channel_id,
+            message_ts,
+            message_text,
+            response_url,
+        } => {
+            process_video_import(bot_token, channel_id, message_ts, message_text, response_url)
+                .await;
+        }
+        BackgroundTask::LoadMore {
+            bot_token,
+            state,
+            button_message_ts,
+            response_url,
+        } => {
+            process_load_more(bot_token, state, button_message_ts, response_url).await;
+        }
+    }
+}
+
+/// Invoke this Lambda asynchronously to process a background task
+async fn invoke_background_task(task: BackgroundTask) -> Result<()> {
+    let function_name = std::env::var("AWS_LAMBDA_FUNCTION_NAME")
+        .map_err(|_| anyhow!("AWS_LAMBDA_FUNCTION_NAME not set"))?;
+
+    let client = LAMBDA_CLIENT
+        .get()
+        .ok_or_else(|| anyhow!("Lambda client not initialized"))?;
+
+    let payload = serde_json::to_vec(&task)?;
+
+    info!("Invoking Lambda {} asynchronously for background task", function_name);
+
+    client
+        .invoke()
+        .function_name(&function_name)
+        .invocation_type(InvocationType::Event) // Async invocation
+        .payload(Blob::new(payload))
+        .send()
+        .await
+        .map_err(|e| anyhow!("Failed to invoke Lambda: {}", e))?;
+
+    Ok(())
 }
 
 async fn process_request(
@@ -153,7 +268,7 @@ fn verify_slack_signature(headers: &HashMap<String, String>, body: &str) -> Resu
 }
 
 async fn handle_bluesky_shortcut(payload: ShortcutPayload) -> Result<ApiGatewayProxyResponse> {
-    // Extract everything needed BEFORE spawning the background task
+    // Extract everything needed BEFORE invoking background task
     let bot_token = std::env::var("SLACK_BOT_TOKEN")
         .map_err(|_| anyhow!("SLACK_BOT_TOKEN not set"))?;
 
@@ -170,10 +285,15 @@ async fn handle_bluesky_shortcut(payload: ShortcutPayload) -> Result<ApiGatewayP
         channel_id, message_ts
     );
 
-    // Spawn background task to do the actual work
-    tokio::spawn(async move {
-        process_thread_unroll(bot_token, channel_id, message_ts, message_text, response_url).await;
-    });
+    // Invoke Lambda asynchronously to do the actual work
+    invoke_background_task(BackgroundTask::ThreadUnroll {
+        bot_token,
+        channel_id,
+        message_ts,
+        message_text,
+        response_url,
+    })
+    .await?;
 
     // Return 200 OK immediately to acknowledge the shortcut
     Ok(ApiGatewayProxyResponse {
@@ -185,7 +305,7 @@ async fn handle_bluesky_shortcut(payload: ShortcutPayload) -> Result<ApiGatewayP
 }
 
 async fn handle_video_import(payload: ShortcutPayload) -> Result<ApiGatewayProxyResponse> {
-    // Extract everything needed BEFORE spawning the background task
+    // Extract everything needed BEFORE invoking background task
     let bot_token = std::env::var("SLACK_BOT_TOKEN")
         .map_err(|_| anyhow!("SLACK_BOT_TOKEN not set"))?;
 
@@ -202,10 +322,15 @@ async fn handle_video_import(payload: ShortcutPayload) -> Result<ApiGatewayProxy
         channel_id, message_ts
     );
 
-    // Spawn background task to do the actual work
-    tokio::spawn(async move {
-        process_video_import(bot_token, channel_id, message_ts, message_text, response_url).await;
-    });
+    // Invoke Lambda asynchronously to do the actual work
+    invoke_background_task(BackgroundTask::VideoImport {
+        bot_token,
+        channel_id,
+        message_ts,
+        message_text,
+        response_url,
+    })
+    .await?;
 
     // Return 200 OK immediately to acknowledge the shortcut
     Ok(ApiGatewayProxyResponse {
@@ -951,7 +1076,7 @@ async fn process_load_more(
 }
 
 async fn handle_block_actions(payload: BlockActionsPayload) -> Result<ApiGatewayProxyResponse> {
-    // Extract everything needed BEFORE spawning the background task
+    // Extract everything needed BEFORE invoking background task
     let bot_token = std::env::var("SLACK_BOT_TOKEN")
         .map_err(|_| anyhow!("SLACK_BOT_TOKEN not set"))?;
 
@@ -985,10 +1110,14 @@ async fn handle_block_actions(payload: BlockActionsPayload) -> Result<ApiGateway
         state.total_count
     );
 
-    // Spawn background task to do the actual work
-    tokio::spawn(async move {
-        process_load_more(bot_token, state, button_message_ts, response_url).await;
-    });
+    // Invoke Lambda asynchronously to do the actual work
+    invoke_background_task(BackgroundTask::LoadMore {
+        bot_token,
+        state,
+        button_message_ts,
+        response_url,
+    })
+    .await?;
 
     // Return 200 OK immediately to acknowledge the button click
     Ok(ApiGatewayProxyResponse {

@@ -20,6 +20,9 @@ hmac = "0.12"
 sha2 = "0.10"
 hex = "0.4"
 base64 = "0.22"
+# Pinned to versions compatible with Rust 1.86
+aws-config = { version = "1.5", default-features = false, features = ["behavior-version-latest", "rustls"] }
+aws-sdk-lambda = "1.60"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util", "macros", "rt-multi-thread"] }
