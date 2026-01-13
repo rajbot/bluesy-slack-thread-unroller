@@ -790,14 +790,17 @@ async fn send_processing_message(
     Ok(())
 }
 
-/// Delete the ephemeral message sent via response_url
-async fn delete_ephemeral_message(
+/// Replace the ephemeral message with a success confirmation
+/// Note: delete_original doesn't work for message shortcuts (returns 500),
+/// so we replace with a brief message instead
+async fn replace_ephemeral_with_success(
     client: &reqwest::Client,
     response_url: &str,
 ) -> Result<()> {
     let payload = serde_json::json!({
         "response_type": "ephemeral",
-        "delete_original": true,
+        "replace_original": true,
+        "text": ":white_check_mark: Video uploaded!",
     });
 
     let response = client
@@ -808,15 +811,15 @@ async fn delete_ephemeral_message(
         .await?;
 
     let status = response.status();
-    let body = response.text().await.unwrap_or_default();
 
     if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
         warn!(
-            "Failed to delete ephemeral message via response_url: status {}, body: {}",
+            "Failed to replace ephemeral message via response_url: status {}, body: {}",
             status, body
         );
     } else {
-        info!("Delete ephemeral response: status {}, body: {}", status, body);
+        info!("Replaced ephemeral message with success confirmation");
     }
 
     Ok(())
@@ -1004,8 +1007,8 @@ async fn process_video_import(
         }
     } else {
         info!("Successfully uploaded video to Slack");
-        // Delete the "Downloading video..." ephemeral message
-        let _ = delete_ephemeral_message(&client, &response_url).await;
+        // Replace "Downloading video..." with success confirmation
+        let _ = replace_ephemeral_with_success(&client, &response_url).await;
     }
 }
 
