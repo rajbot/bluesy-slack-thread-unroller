@@ -790,6 +790,32 @@ async fn send_processing_message(
     Ok(())
 }
 
+/// Delete the ephemeral message sent via response_url
+async fn delete_ephemeral_message(
+    client: &reqwest::Client,
+    response_url: &str,
+) -> Result<()> {
+    let payload = serde_json::json!({
+        "delete_original": true,
+    });
+
+    let response = client
+        .post(response_url)
+        .header("Content-Type", "application/json")
+        .json(&payload)
+        .send()
+        .await?;
+
+    if !response.status().is_success() {
+        warn!(
+            "Failed to delete ephemeral message via response_url: status {}",
+            response.status()
+        );
+    }
+
+    Ok(())
+}
+
 /// Background task to process thread unrolling
 async fn process_thread_unroll(
     bot_token: String,
@@ -972,6 +998,8 @@ async fn process_video_import(
         }
     } else {
         info!("Successfully uploaded video to Slack");
+        // Delete the "Downloading video..." ephemeral message
+        let _ = delete_ephemeral_message(&client, &response_url).await;
     }
 }
 
