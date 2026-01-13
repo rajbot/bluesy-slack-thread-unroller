@@ -153,212 +153,61 @@ fn verify_slack_signature(headers: &HashMap<String, String>, body: &str) -> Resu
 }
 
 async fn handle_bluesky_shortcut(payload: ShortcutPayload) -> Result<ApiGatewayProxyResponse> {
+    // Extract everything needed BEFORE spawning the background task
     let bot_token = std::env::var("SLACK_BOT_TOKEN")
         .map_err(|_| anyhow!("SLACK_BOT_TOKEN not set"))?;
 
-    // Extract data using helper functions
-    let channel_id = extract_channel_id(&payload)?;
-    let message_ts = extract_message_ts(&payload)?;
-    let message_text = extract_message_text(&payload)?;
-
-    // Extract response_url for sending messages back to user
+    let channel_id = extract_channel_id(&payload)?.to_string();
+    let message_ts = extract_message_ts(&payload)?.to_string();
+    let message_text = extract_message_text(&payload)?.to_string();
     let response_url = payload
         .response_url
-        .as_ref()
+        .clone()
         .ok_or_else(|| anyhow!("Could not extract response_url from payload"))?;
 
     info!(
-        "Processing message in channel {} with ts {}",
+        "Received unroll_bluesky_thread shortcut for channel {} with ts {}",
         channel_id, message_ts
     );
 
-    // Find Bluesky URL in the message
-    let bsky_url = extract_bluesky_url(message_text)
-        .ok_or_else(|| anyhow!("No Bluesky URL found in message"))?;
+    // Spawn background task to do the actual work
+    tokio::spawn(async move {
+        process_thread_unroll(bot_token, channel_id, message_ts, message_text, response_url).await;
+    });
 
-    info!("Found Bluesky URL: {}", bsky_url);
-
-    // Recursively fetch all pages to get true total count
-    let (thread, total_count) = bsky_thread_lib::fetch_thread_with_total(&bsky_url).await?;
-
-    info!(
-        "Fetched complete thread with {} posts by {} (recursive fetch)",
-        total_count,
-        thread.author.handle
-    );
-
-    // Post first batch (starting from index 1, skipping root at 0)
-    let client = reqwest::Client::new();
-    let batch_end = std::cmp::min(BATCH_SIZE - 1, total_count - 1); // First batch ends at index 9 (displays as [10/TOTAL])
-
-    if batch_end >= 1 {
-        let result = post_batch(
-            &client,
-            &bot_token,
-            channel_id,
-            message_ts,
-            &thread.posts,
-            1,         // start_idx (skip root at 0)
-            batch_end, // end_idx
-            total_count,
-        )
-        .await;
-
-        // Check for not_in_channel error and send message via response_url
-        if let Err(e) = result {
-            let error_msg = e.to_string();
-            if error_msg.contains("not_in_channel") {
-                info!("Bot not in channel {}, sending message via response_url", channel_id);
-                send_not_in_channel_message(&client, response_url).await?;
-
-                // Return success to acknowledge the shortcut
-                return Ok(ApiGatewayProxyResponse {
-                    status_code: 200,
-                    headers: HashMap::new(),
-                    body: None,
-                    is_base64_encoded: false,
-                });
-            }
-            // For other errors, propagate them
-            return Err(e);
-        }
-    }
-
-    // Post "load more" button if there are remaining posts
-    if total_count > BATCH_SIZE {
-        // More than BATCH_SIZE total posts means more than first batch (9 posts)
-        // Get continuation URI (URI of last post we just displayed)
-        let continuation_uri = thread.posts[batch_end].uri.clone();
-
-        post_load_more_button(
-            &client,
-            &bot_token,
-            channel_id,
-            message_ts,
-            &bsky_url,
-            0, // current_batch (just completed batch 0)
-            total_count,
-            &continuation_uri,
-            &thread.author.did,
-        )
-        .await?;
-    }
-
-    // Return success acknowledgment
+    // Return 200 OK immediately to acknowledge the shortcut
     Ok(ApiGatewayProxyResponse {
         status_code: 200,
         headers: HashMap::new(),
-        body: None, // Empty body acknowledges the shortcut
+        body: None,
         is_base64_encoded: false,
     })
 }
 
 async fn handle_video_import(payload: ShortcutPayload) -> Result<ApiGatewayProxyResponse> {
+    // Extract everything needed BEFORE spawning the background task
     let bot_token = std::env::var("SLACK_BOT_TOKEN")
         .map_err(|_| anyhow!("SLACK_BOT_TOKEN not set"))?;
 
-    // Extract data using helper functions
-    let channel_id = extract_channel_id(&payload)?;
-    let message_ts = extract_message_ts(&payload)?;
-    let message_text = extract_message_text(&payload)?;
-
-    // Extract response_url for sending messages back to user
+    let channel_id = extract_channel_id(&payload)?.to_string();
+    let message_ts = extract_message_ts(&payload)?.to_string();
+    let message_text = extract_message_text(&payload)?.to_string();
     let response_url = payload
         .response_url
-        .as_ref()
+        .clone()
         .ok_or_else(|| anyhow!("Could not extract response_url from payload"))?;
 
     info!(
-        "Processing video import in channel {} with ts {}",
+        "Received import_video shortcut for channel {} with ts {}",
         channel_id, message_ts
     );
 
-    // Find Bluesky URL in the message
-    let bsky_url = extract_bluesky_url(message_text)
-        .ok_or_else(|| anyhow!("No Bluesky URL found in message"))?;
+    // Spawn background task to do the actual work
+    tokio::spawn(async move {
+        process_video_import(bot_token, channel_id, message_ts, message_text, response_url).await;
+    });
 
-    info!("Found Bluesky URL: {}", bsky_url);
-
-    let client = reqwest::Client::new();
-
-    // Fetch video info from Bluesky
-    let video_info = match bsky_video_lib::fetch_video_info(&client, &bsky_url).await {
-        Ok(info) => info,
-        Err(e) => {
-            warn!("Failed to fetch video info: {}", e);
-            send_ephemeral_error(&client, response_url, &format!("Could not find video in post: {}", e)).await?;
-            return Ok(ApiGatewayProxyResponse {
-                status_code: 200,
-                headers: HashMap::new(),
-                body: None,
-                is_base64_encoded: false,
-            });
-        }
-    };
-
-    info!("Found video, downloading from playlist: {}", video_info.playlist_url);
-
-    // Download video to memory
-    let ts_data = match bsky_video_lib::download_video_to_memory(&client, &video_info.playlist_url).await {
-        Ok(data) => data,
-        Err(e) => {
-            warn!("Failed to download video: {}", e);
-            send_ephemeral_error(&client, response_url, &format!("Failed to download video: {}", e)).await?;
-            return Ok(ApiGatewayProxyResponse {
-                status_code: 200,
-                headers: HashMap::new(),
-                body: None,
-                is_base64_encoded: false,
-            });
-        }
-    };
-
-    info!("Downloaded {} bytes of TS data", ts_data.len());
-
-    // Convert to MP4
-    let mp4_data = match bsky_video_lib::convert_to_mp4(&ts_data) {
-        Ok(data) => data,
-        Err(e) => {
-            warn!("Failed to convert video to MP4: {}", e);
-            send_ephemeral_error(&client, response_url, &format!("Failed to convert video: {}", e)).await?;
-            return Ok(ApiGatewayProxyResponse {
-                status_code: 200,
-                headers: HashMap::new(),
-                body: None,
-                is_base64_encoded: false,
-            });
-        }
-    };
-
-    info!("Converted to {} bytes of MP4 data", mp4_data.len());
-
-    // Upload to Slack
-    let filename = format!("{}.mp4", video_info.post_id);
-    let result = upload_file_to_slack(
-        &client,
-        &bot_token,
-        channel_id,
-        message_ts,
-        &filename,
-        mp4_data,
-    )
-    .await;
-
-    // Check for not_in_channel error
-    if let Err(e) = result {
-        let error_msg = e.to_string();
-        if error_msg.contains("not_in_channel") || error_msg.contains("channel_not_found") {
-            info!("Bot not in channel {}, sending message via response_url", channel_id);
-            send_not_in_channel_message(&client, response_url).await?;
-        } else {
-            warn!("Failed to upload video: {}", e);
-            send_ephemeral_error(&client, response_url, &format!("Failed to upload video: {}", e)).await?;
-        }
-    } else {
-        info!("Successfully uploaded video to Slack");
-    }
-
-    // Return success acknowledgment
+    // Return 200 OK immediately to acknowledge the shortcut
     Ok(ApiGatewayProxyResponse {
         status_code: 200,
         headers: HashMap::new(),
@@ -789,25 +638,226 @@ async fn send_not_in_channel_message(
     Ok(())
 }
 
-async fn handle_block_actions(payload: BlockActionsPayload) -> Result<ApiGatewayProxyResponse> {
-    let bot_token = std::env::var("SLACK_BOT_TOKEN")
-        .map_err(|_| anyhow!("SLACK_BOT_TOKEN not set"))?;
+async fn send_processing_message(
+    client: &reqwest::Client,
+    response_url: &str,
+    message: &str,
+) -> Result<()> {
+    let payload = serde_json::json!({
+        "response_type": "ephemeral",
+        "text": message,
+    });
 
-    // Extract response_url for sending messages back to user
-    let response_url = payload
-        .response_url
-        .as_ref()
-        .ok_or_else(|| anyhow!("Could not extract response_url from payload"))?;
+    let response = client
+        .post(response_url)
+        .header("Content-Type", "application/json")
+        .json(&payload)
+        .send()
+        .await?;
 
-    // Find our action in the actions array
-    let action = payload
-        .actions
-        .iter()
-        .find(|a| a.action_id == LOAD_MORE_ACTION_ID)
-        .ok_or_else(|| anyhow!("Load more action not found"))?;
+    if !response.status().is_success() {
+        warn!(
+            "Failed to send processing message via response_url: status {}",
+            response.status()
+        );
+    }
 
-    // Deserialize state from button value
-    let state: LoadMoreState = serde_json::from_str(&action.value)?;
+    Ok(())
+}
+
+/// Background task to process thread unrolling
+async fn process_thread_unroll(
+    bot_token: String,
+    channel_id: String,
+    message_ts: String,
+    message_text: String,
+    response_url: String,
+) {
+    let client = reqwest::Client::new();
+
+    // Send initial processing message
+    if let Err(e) = send_processing_message(&client, &response_url, "Fetching Bluesky thread...").await {
+        warn!("Failed to send processing message: {}", e);
+    }
+
+    // Find Bluesky URL in the message
+    let bsky_url = match extract_bluesky_url(&message_text) {
+        Some(url) => url,
+        None => {
+            let _ = send_ephemeral_error(&client, &response_url, "No Bluesky URL found in message").await;
+            return;
+        }
+    };
+
+    info!("Found Bluesky URL: {}", bsky_url);
+
+    // Recursively fetch all pages to get true total count
+    let (thread, total_count) = match bsky_thread_lib::fetch_thread_with_total(&bsky_url).await {
+        Ok(result) => result,
+        Err(e) => {
+            error!("Failed to fetch thread: {}", e);
+            let _ = send_ephemeral_error(&client, &response_url, &format!("Failed to fetch thread: {}", e)).await;
+            return;
+        }
+    };
+
+    info!(
+        "Fetched complete thread with {} posts by {} (recursive fetch)",
+        total_count,
+        thread.author.handle
+    );
+
+    // Post first batch (starting from index 1, skipping root at 0)
+    let batch_end = std::cmp::min(BATCH_SIZE - 1, total_count - 1);
+
+    if batch_end >= 1 {
+        let result = post_batch(
+            &client,
+            &bot_token,
+            &channel_id,
+            &message_ts,
+            &thread.posts,
+            1,         // start_idx (skip root at 0)
+            batch_end, // end_idx
+            total_count,
+        )
+        .await;
+
+        // Check for not_in_channel error
+        if let Err(e) = result {
+            let error_msg = e.to_string();
+            if error_msg.contains("not_in_channel") {
+                info!("Bot not in channel {}, sending message via response_url", channel_id);
+                let _ = send_not_in_channel_message(&client, &response_url).await;
+                return;
+            }
+            error!("Failed to post batch: {}", e);
+            let _ = send_ephemeral_error(&client, &response_url, &format!("Failed to post messages: {}", e)).await;
+            return;
+        }
+    }
+
+    // Post "load more" button if there are remaining posts
+    if total_count > BATCH_SIZE {
+        let continuation_uri = thread.posts[batch_end].uri.clone();
+
+        if let Err(e) = post_load_more_button(
+            &client,
+            &bot_token,
+            &channel_id,
+            &message_ts,
+            &bsky_url,
+            0, // current_batch (just completed batch 0)
+            total_count,
+            &continuation_uri,
+            &thread.author.did,
+        )
+        .await
+        {
+            warn!("Failed to post load more button: {}", e);
+        }
+    }
+
+    info!("Thread unroll completed successfully");
+}
+
+/// Background task to process video import
+async fn process_video_import(
+    bot_token: String,
+    channel_id: String,
+    message_ts: String,
+    message_text: String,
+    response_url: String,
+) {
+    let client = reqwest::Client::new();
+
+    // Send initial processing message
+    if let Err(e) = send_processing_message(&client, &response_url, "Downloading video from Bluesky...").await {
+        warn!("Failed to send processing message: {}", e);
+    }
+
+    // Find Bluesky URL in the message
+    let bsky_url = match extract_bluesky_url(&message_text) {
+        Some(url) => url,
+        None => {
+            let _ = send_ephemeral_error(&client, &response_url, "No Bluesky URL found in message").await;
+            return;
+        }
+    };
+
+    info!("Found Bluesky URL: {}", bsky_url);
+
+    // Fetch video info from Bluesky
+    let video_info = match bsky_video_lib::fetch_video_info(&client, &bsky_url).await {
+        Ok(info) => info,
+        Err(e) => {
+            warn!("Failed to fetch video info: {}", e);
+            let _ = send_ephemeral_error(&client, &response_url, &format!("Could not find video in post: {}", e)).await;
+            return;
+        }
+    };
+
+    info!("Found video, downloading from playlist: {}", video_info.playlist_url);
+
+    // Download video to memory
+    let ts_data = match bsky_video_lib::download_video_to_memory(&client, &video_info.playlist_url).await {
+        Ok(data) => data,
+        Err(e) => {
+            warn!("Failed to download video: {}", e);
+            let _ = send_ephemeral_error(&client, &response_url, &format!("Failed to download video: {}", e)).await;
+            return;
+        }
+    };
+
+    info!("Downloaded {} bytes of TS data", ts_data.len());
+
+    // Convert to MP4
+    let mp4_data = match bsky_video_lib::convert_to_mp4(&ts_data) {
+        Ok(data) => data,
+        Err(e) => {
+            warn!("Failed to convert video to MP4: {}", e);
+            let _ = send_ephemeral_error(&client, &response_url, &format!("Failed to convert video: {}", e)).await;
+            return;
+        }
+    };
+
+    info!("Converted to {} bytes of MP4 data", mp4_data.len());
+
+    // Upload to Slack
+    let filename = format!("{}.mp4", video_info.post_id);
+    let result = upload_file_to_slack(
+        &client,
+        &bot_token,
+        &channel_id,
+        &message_ts,
+        &filename,
+        mp4_data,
+    )
+    .await;
+
+    // Check for not_in_channel error
+    if let Err(e) = result {
+        let error_msg = e.to_string();
+        if error_msg.contains("not_in_channel") || error_msg.contains("channel_not_found") {
+            info!("Bot not in channel {}, sending message via response_url", channel_id);
+            let _ = send_not_in_channel_message(&client, &response_url).await;
+        } else {
+            warn!("Failed to upload video: {}", e);
+            let _ = send_ephemeral_error(&client, &response_url, &format!("Failed to upload video: {}", e)).await;
+        }
+    } else {
+        info!("Successfully uploaded video to Slack");
+    }
+}
+
+/// Background task to process "load more" button clicks
+async fn process_load_more(
+    bot_token: String,
+    state: LoadMoreState,
+    button_message_ts: String,
+    response_url: String,
+) {
+    let client = reqwest::Client::new();
 
     info!(
         "Loading batch {} (total: {}) from continuation URI",
@@ -815,23 +865,23 @@ async fn handle_block_actions(payload: BlockActionsPayload) -> Result<ApiGateway
         state.total_count
     );
 
-    // Extract message timestamp to delete the button message
-    let button_message_ts = payload
-        .message
-        .as_ref()
-        .and_then(|m| m.get("ts"))
-        .and_then(|ts| ts.as_str())
-        .ok_or_else(|| anyhow!("Could not find button message timestamp"))?;
-
     // Delete the button message
-    let client = reqwest::Client::new();
-    delete_message(&client, &bot_token, &state.channel_id, button_message_ts).await?;
+    if let Err(e) = delete_message(&client, &bot_token, &state.channel_id, &button_message_ts).await {
+        warn!("Failed to delete button message: {}", e);
+    }
 
     // Fetch ONLY the next page starting from continuation URI
-    let posts = bsky_thread_lib::fetch_thread_from_uri(
+    let posts = match bsky_thread_lib::fetch_thread_from_uri(
         &state.continuation_uri,
         &state.author_did
-    ).await?;
+    ).await {
+        Ok(posts) => posts,
+        Err(e) => {
+            error!("Failed to fetch thread continuation: {}", e);
+            let _ = send_ephemeral_error(&client, &response_url, &format!("Failed to load more posts: {}", e)).await;
+            return;
+        }
+    };
 
     // Calculate batch range
     let next_batch = state.current_batch + 1;
@@ -861,23 +911,17 @@ async fn handle_block_actions(payload: BlockActionsPayload) -> Result<ApiGateway
     )
     .await;
 
-    // Check for not_in_channel error and send message via response_url
+    // Check for not_in_channel error
     if let Err(e) = result {
         let error_msg = e.to_string();
         if error_msg.contains("not_in_channel") {
             info!("Bot not in channel {}, sending message via response_url", state.channel_id);
-            send_not_in_channel_message(&client, response_url).await?;
-
-            // Return success to acknowledge the button action
-            return Ok(ApiGatewayProxyResponse {
-                status_code: 200,
-                headers: HashMap::new(),
-                body: None,
-                is_base64_encoded: false,
-            });
+            let _ = send_not_in_channel_message(&client, &response_url).await;
+            return;
         }
-        // For other errors, propagate them
-        return Err(e);
+        error!("Failed to post batch: {}", e);
+        let _ = send_ephemeral_error(&client, &response_url, &format!("Failed to load more posts: {}", e)).await;
+        return;
     }
 
     // Check if more posts remain
@@ -886,7 +930,7 @@ async fn handle_block_actions(payload: BlockActionsPayload) -> Result<ApiGateway
         // Get new continuation URI (last post we just displayed)
         let new_continuation_uri = posts[page_end].uri.clone();
 
-        post_load_more_button(
+        if let Err(e) = post_load_more_button(
             &client,
             &bot_token,
             &state.channel_id,
@@ -897,10 +941,56 @@ async fn handle_block_actions(payload: BlockActionsPayload) -> Result<ApiGateway
             &new_continuation_uri,
             &state.author_did,
         )
-        .await?;
+        .await
+        {
+            warn!("Failed to post load more button: {}", e);
+        }
     }
 
-    // Return success (no response needed for button clicks)
+    info!("Load more batch completed successfully");
+}
+
+async fn handle_block_actions(payload: BlockActionsPayload) -> Result<ApiGatewayProxyResponse> {
+    // Extract everything needed BEFORE spawning the background task
+    let bot_token = std::env::var("SLACK_BOT_TOKEN")
+        .map_err(|_| anyhow!("SLACK_BOT_TOKEN not set"))?;
+
+    let response_url = payload
+        .response_url
+        .clone()
+        .ok_or_else(|| anyhow!("Could not extract response_url from payload"))?;
+
+    // Find our action in the actions array
+    let action = payload
+        .actions
+        .iter()
+        .find(|a| a.action_id == LOAD_MORE_ACTION_ID)
+        .ok_or_else(|| anyhow!("Load more action not found"))?;
+
+    // Deserialize state from button value
+    let state: LoadMoreState = serde_json::from_str(&action.value)?;
+
+    // Extract message timestamp to delete the button message
+    let button_message_ts = payload
+        .message
+        .as_ref()
+        .and_then(|m| m.get("ts"))
+        .and_then(|ts| ts.as_str())
+        .ok_or_else(|| anyhow!("Could not find button message timestamp"))?
+        .to_string();
+
+    info!(
+        "Received load_more button click for batch {} (total: {})",
+        state.current_batch + 1,
+        state.total_count
+    );
+
+    // Spawn background task to do the actual work
+    tokio::spawn(async move {
+        process_load_more(bot_token, state, button_message_ts, response_url).await;
+    });
+
+    // Return 200 OK immediately to acknowledge the button click
     Ok(ApiGatewayProxyResponse {
         status_code: 200,
         headers: HashMap::new(),
