@@ -2,7 +2,8 @@ use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
 use serde::Deserialize;
-use std::process::Command;
+use std::fs::File;
+use std::io::BufReader;
 use tokio::io::AsyncWriteExt;
 
 const PUBLIC_API: &str = "https://public.api.bsky.app/xrpc";
@@ -18,7 +19,7 @@ struct Args {
     #[arg(short, long)]
     output: Option<String>,
 
-    /// Convert to MP4 using ffmpeg (requires ffmpeg in PATH)
+    /// Convert to MP4 (uses native Rust remuxing, no ffmpeg needed)
     #[arg(long)]
     mp4: bool,
 
@@ -313,20 +314,15 @@ async fn download_video(
     Ok(())
 }
 
-/// Convert .ts file to .mp4 using ffmpeg
+/// Convert .ts file to .mp4 using ts-to-mp4 library (pure Rust, no ffmpeg needed)
 fn convert_to_mp4(input_path: &str, output_path: &str) -> Result<()> {
-    let status = Command::new("ffmpeg")
-        .args([
-            "-i", input_path, "-c", "copy", // Copy streams without re-encoding
-            "-y", // Overwrite output file
-            output_path,
-        ])
-        .status()
-        .context("Failed to run ffmpeg. Is ffmpeg installed and in PATH?")?;
+    let input = BufReader::new(
+        File::open(input_path).with_context(|| format!("Failed to open input file: {}", input_path))?,
+    );
+    let mut output = File::create(output_path)
+        .with_context(|| format!("Failed to create output file: {}", output_path))?;
 
-    if !status.success() {
-        return Err(anyhow!("ffmpeg conversion failed with exit code: {:?}", status.code()));
-    }
+    ts_to_mp4::remux(input, &mut output).context("Failed to remux TS to MP4")?;
 
     // Remove the .ts file after successful conversion
     std::fs::remove_file(input_path).context("Failed to remove temporary .ts file")?;

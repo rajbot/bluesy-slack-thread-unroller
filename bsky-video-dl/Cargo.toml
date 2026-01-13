@@ -16,3 +16,4 @@ clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 urlencoding = "2"
 indicatif = "0.17"
+ts-to-mp4 = { git = "https://github.com/rajbot/ts-to-mp4" }

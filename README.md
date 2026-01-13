@@ -48,7 +48,7 @@ cargo build --release -p bsky-video-dl
 # Download video as .ts file (filename auto-generated from post ID)
 ./target/release/bsky-video-dl 'https://bsky.app/profile/user.bsky.social/post/xyz'
 
-# Download and convert to MP4 (requires ffmpeg)
+# Download and convert to MP4 (pure Rust, no ffmpeg needed)
 ./target/release/bsky-video-dl --mp4 'https://bsky.app/profile/user.bsky.social/post/xyz'
 
 # Custom output filename
