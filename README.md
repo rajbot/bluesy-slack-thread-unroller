@@ -223,6 +223,8 @@ The bot must be invited to any channel where you want to use it:
 
 ### Import Video
 
+![Bluesky Video Import Demo](bluesky-import-video.gif)
+
 1. User triggers "Import Video" shortcut on a message containing a Bluesky post URL
 2. Lambda extracts the Bluesky URL and fetches video metadata
 3. Downloads HLS video segments from Bluesky's CDN
