@@ -796,6 +796,7 @@ async fn delete_ephemeral_message(
     response_url: &str,
 ) -> Result<()> {
     let payload = serde_json::json!({
+        "response_type": "ephemeral",
         "delete_original": true,
     });
 
@@ -806,11 +807,16 @@ async fn delete_ephemeral_message(
         .send()
         .await?;
 
-    if !response.status().is_success() {
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+
+    if !status.is_success() {
         warn!(
-            "Failed to delete ephemeral message via response_url: status {}",
-            response.status()
+            "Failed to delete ephemeral message via response_url: status {}, body: {}",
+            status, body
         );
+    } else {
+        info!("Delete ephemeral response: status {}, body: {}", status, body);
     }
 
     Ok(())
