@@ -2488,7 +2488,7 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 [[package]]
 name = "ts-to-mp4"
 version = "0.1.0"
-source = "git+https://github.com/rajbot/ts-to-mp4#d661fe1f12d2dd7ad21993cb2b15df574e3688ad"
+source = "git+https://github.com/rajbot/ts-to-mp4#30f889d520ec8638bfbf0363de610d2b69055c87"
 dependencies = [
  "thiserror 1.0.69",
 ]
