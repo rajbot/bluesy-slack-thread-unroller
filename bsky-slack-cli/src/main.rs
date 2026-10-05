@@ -113,7 +113,7 @@ async fn main() -> Result<()> {
         .posts
         .iter()
         .enumerate()
-        .map(|(i, post)| format!("[{}/{}] {}", i + 1, total_count, post.url))
+        .map(|(i, post)| format!("<{}|[{}/{}]>", post.url, i + 1, total_count))
         .collect();
 
     if args.dry_run {
