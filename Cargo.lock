@@ -488,6 +488,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "bsky-slack-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bsky-thread-lib",
+ "clap",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "bsky-slack-lambda"
 version = "0.1.0"
 dependencies = [
