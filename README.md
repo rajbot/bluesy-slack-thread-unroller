@@ -12,6 +12,7 @@ bsky-thread-unroller/
 ├── bsky-video-lib/         # Shared library for downloading Bluesky videos
 ├── bsky-thread-cli/        # CLI tool for unrolling threads
 ├── bsky-video-dl/          # CLI tool for downloading videos
+├── bsky-slack-cli/         # CLI tool for posting threads to Slack via scli
 └── bsky-slack-lambda/      # Slack app (AWS Lambda)
 ```
 
@@ -60,6 +61,38 @@ cargo build --release -p bsky-video-dl
 ```
 
 The tool automatically selects the highest quality available (e.g., 720p over 360p).
+
+---
+
+## Slack Thread CLI
+
+Unroll a Bluesky thread into a Slack thread from the command line, using [scli](https://slack-github.com/raj/scli)'s `send` subcommand. The root post is sent as a top-level channel message and each subsequent post is threaded beneath it.
+
+### Build
+
+```bash
+cargo build --release -p bsky-slack-cli
+```
+
+### Usage
+
+Requires `SLACK_TOKEN` and `SLACK_COOKIE` to be set for scli.
+
+```bash
+# Post to a channel by ID
+./target/release/bsky-slack-thread 'https://bsky.app/profile/user.bsky.social/post/xyz' C12345678
+
+# Post to a channel URL (workspace domain is taken from the URL)
+./target/release/bsky-slack-thread 'https://bsky.app/profile/user.bsky.social/post/xyz' https://myteam.slack.com/archives/C12345678
+
+# Preview messages without posting
+./target/release/bsky-slack-thread --dry-run 'https://bsky.app/profile/user.bsky.social/post/xyz' C12345678
+```
+
+Options:
+- `--scli <path>` - path to the scli binary (default: `~/dev/scli/scli`)
+- `--domain <domain>` - workspace domain used for thread permalinks with a bare channel ID (default: `salesforce.enterprise`)
+- `--delay-ms <ms>` - delay between posts (default: 10000)
 
 ---
 
